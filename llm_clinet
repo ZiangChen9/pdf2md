@@ -1,0 +1,97 @@
+import time
+from typing import Dict, Generator, List
+
+from openai import AsyncOpenAI, OpenAI
+
+
+class OpenAICompatibleClient:
+    def __init__(self, api_key: str, base_url: str):
+        self.api_key = api_key
+        self.base_url = base_url
+        self.client = OpenAI(api_key=api_key, base_url=base_url)
+        self.async_client = AsyncOpenAI(api_key=api_key, base_url=base_url)
+
+    def chat_completion_stream(
+        self, messages: List[Dict[str, str]], model_name: str, temperature: float = 0
+    ) -> Generator[tuple[str, float], None, None]:
+        """流式调用LLM，返回内容和首次响应耗时"""
+        start_time = time.time()
+        completion = self.client.chat.completions.create(
+            model=model_name,
+            messages=messages,
+            temperature=temperature,
+            stream=True,
+            stream_options={"include_usage": True},
+        )
+
+        first_response_time = None
+        for chunk in completion:
+            if chunk.choices and chunk.choices[0].delta.content:
+                content = chunk.choices[0].delta.content
+                # 记录第一次返回的时间
+                if first_response_time is None:
+                    first_response_time = time.time() - start_time
+                yield content, first_response_time
+
+    def chat_completion(
+        self, messages: List[Dict[str, str]], model_name: str, temperature: float = 0
+    ) -> str:
+        """非流式调用LLM"""
+        completion = self.client.chat.completions.create(
+            model=model_name, messages=messages, temperature=temperature
+        )
+        return completion.choices[0].message.content
+
+    async def chat_completion_async(
+        self, messages: List[Dict[str, str]], model_name: str, temperature: float = 0
+    ) -> str:
+        """非流式调用LLM"""
+        completion = await self.async_client.chat.completions.create(
+            model=model_name, messages=messages, temperature=temperature
+        )
+        return completion.choices[0].message.content
+
+    async def chat_completion_stream_async(
+        self, messages: List[Dict[str, str]], model_name: str, temperature: float = 0
+    ) -> str:
+        """流式调用LLM，返回内容"""
+        completion = await self.async_client.chat.completions.create(
+            model=model_name,
+            messages=messages,
+            stream=True,
+            temperature=temperature,
+            stream_options={"include_usage": True},
+        )
+
+        full_response = ""
+        async for chunk in completion:
+            if chunk.choices and chunk.choices[0].delta.content:
+                full_response += chunk.choices[0].delta.content
+        return full_response
+
+
+class ClientCreator:
+
+    def __init__(self, config: dict):
+        self.config = config
+
+    def create_llm_client(self):
+        return self._get_llm_client(
+            api_key=self.config["llm"]["general_api_key"],
+            base_url=self.config["llm"]["general_base_url"],
+        )
+
+    def create_rewrite_client(self):
+        return self._get_llm_client(
+            api_key=self.config["llm"]["rewrite_api_key"],
+            base_url=self.config["llm"]["rewrite_base_url"],
+        )
+
+    def create_generate_client(self):
+        return self._get_llm_client(
+            api_key=self.config["llm"]["generate_api_key"],
+            base_url=self.config["llm"]["generate_base_url"],
+        )
+
+    def _get_llm_client(self, **kwargs):
+        return OpenAICompatibleClient(**kwargs)
