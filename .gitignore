@@ -1,0 +1,5 @@
+scripts/
+model/
+data/
+test/
+__pycache__/

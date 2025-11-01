@@ -3,13 +3,23 @@ import json
 import random
 import warnings
 from collections import deque
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, ClassVar, Deque, Dict, List, Literal, Tuple, TypeVar, Union
+from typing import (
+    Any,
+    ClassVar,
+    Deque,
+    Dict,
+    List,
+    Literal,
+    Optional,
+    Tuple,
+    TypeVar,
+    Union,
+)
 
 import numpy as np
 import pdfplumber
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from pypdf import PdfReader
 from pypdf.generic import Destination
 
@@ -18,29 +28,28 @@ BoundingBox = Tuple[T, T, T, T]
 ElementType = Literal["plain_text", "table", "link", "figure", "header"]
 
 
-@dataclass
-class OutlineInfo:
-    """Outline Message in PDF"""
+class OutlineInfo(BaseModel):
+    """Outline in PDF"""
 
-    level: int  # Outline level
-    title: str  # Outline title
-    page_number: int  # Outline page number
+    level: int = Field(..., description="Outline level")
+    title: str = Field(..., description="Outline title")
+    page_number: Optional[int] = Field(None, description="Outline page number")
 
 
 class PageElement(BaseModel):
-    """Page Element in PDF"""
+    """Element in PDF page, including its type, content and bounding box"""
 
-    content_type: ElementType  # Element type
-    element_id: int  # Element unique id
-    page_idx: int  # Element page index
-    content: str  # Element content
-    bbox: BoundingBox  # Element bounding box
+    element_id: int = Field(..., description="Element unique id")
+    content_type: ElementType = Field(..., description="Element type")
+    page_idx: int = Field(..., description="Element page index")
+    content: str = Field(..., description="Element content")
+    bbox: BoundingBox = Field(..., description="Element bounding box")
     _id_counter: ClassVar[int] = 0  # Ensure unique id
 
     def __init__(self, **data):
         if "element_id" not in data or data["element_id"] is None:
-            type(self)._id_counter += 1
-            data["element_id"] = type(self)._id_counter
+            PageElement._id_counter += 1
+            data["element_id"] = PageElement._id_counter
         super().__init__(**data)
 
     def to_dict(self):
@@ -60,7 +69,7 @@ class PDFPage:
 
     def __init__(self, page_idx: int, page_size: Tuple[float, float]):
         self.page_idx = page_idx
-        self.page_size = page_size  # （宽，高）
+        self.page_size = page_size  #
         self.elements: List[PageElement] = []
 
     def add_and_sort_element(self, element: PageElement):
@@ -150,18 +159,16 @@ class PDFPage:
             if e.content_type == "plain_text":
                 buffer_text.append(content)
             else:
-                if buffer_text:  # flush 缓存正文
+                if buffer_text:  # flush buffer text
                     markdown_parts.append("".join(buffer_text))
                     buffer_text = []
                 markdown_parts.append(content)
-        if buffer_text:  # 最后一批正文
+        if buffer_text:  # last batch of plain text
             markdown_parts.append("".join(buffer_text))
         return "\n".join(markdown_parts).strip()
 
     def clear(self):
-        """
-        释放内存
-        """
+        """Release memory"""
         for element in self.elements:
             if hasattr(element, "clear"):
                 element.clear()
@@ -170,9 +177,6 @@ class PDFPage:
 
 
 class PDFFile:
-    """
-    单个PDF,包含去除页眉页脚、使用标题refine以及转markdown的功能
-    """
 
     def __init__(self, file_path: Union[str, Path], debug: bool = False):
         self.file_path = Path(file_path)
@@ -183,22 +187,20 @@ class PDFFile:
         self.outlines: Deque[OutlineInfo] = self._get_outline()
         self.can_use_outlines: bool = len(self.outlines) > 0
 
-        self.pages: List[PDFPage] = []  # 所有的二级page对象
-        self.all_elements: List[PageElement] = []  # 所有的三级元素对象
+        self.pages: List[PDFPage] = []
+        self.all_elements: List[PageElement] = []
         self.debug: bool = debug
 
     def _get_outline(self) -> deque[OutlineInfo]:
-        """
-        解析PDF大纲，返回OutlineInfos结构
-        """
+        """Parse PDF outline, return OutlineInfos structure"""
         reader = PdfReader(self.file_path)
-        outline = reader.outline  # 获得所有的outline信息
+        outline = reader.outline  # get all outline information
         results: Deque[OutlineInfo] = deque()
 
         def walk(items, level: int = 1):
             for item in items:
                 if isinstance(item, list):
-                    # 子书签列表，递归进入，深度+1
+                    # sub-bookmark list, recursive enter, depth + 1
                     walk(item, level + 1)
                 elif isinstance(item, Destination):
                     outline_info = OutlineInfo(
@@ -213,17 +215,15 @@ class PDFFile:
         return results
 
     def add_and_refine_page(self, page: PDFPage):
-        # 若outline可用且则启用当页标题refine
+        # if outlines are available and can be used, enable page title refine
         if self.can_use_outlines:
             self._refine_with_outlines_on_page(page)
-        # 否则不做处理，留到最后的全局refine
+        # otherwise, do nothing, leave it to the global refine at the end
         self.pages.append(page)
 
     def _refine_with_outlines_on_page(self, page: PDFPage) -> None:
-        """
-        根据大纲信息，在当页修正页面内的元素类型
-        """
-        # 取出当前页的所有标题
+        """Refine page elements with outline information"""
+        # get all titles on the current page
         outlines_on_page = self._pop_outlines_for_page(page.page_idx)
         if self.debug:
             print("outline:", [o for o in outlines_on_page])
@@ -240,20 +240,18 @@ class PDFFile:
                 if ratio > best_score:
                     best_match = outline
                     best_score = ratio
-            # 如果找到相似度足够高的标题，就修正
+            # if a title with high similarity is found, refine it
             if best_match and best_score >= 0.8:
                 if self.debug:
-                    print(f"修改前：{element}")
+                    print(f"before refine: {element}")
                 element.content_type = "header"
                 element.content = f"{'#' * best_match.level} {best_match.title.strip()}"
                 if self.debug:
-                    print(f"匹配标题: {best_match.title} (score={best_score:.2f})")
-                    print(f"修改后：{element}")
+                    print(f"matched title: {best_match.title} (score={best_score:.2f})")
+                    print(f"after refine: {element}")
 
     def _pop_outlines_for_page(self, page_idx: int) -> List[OutlineInfo]:
-        """
-        从deque中取出所有属于当前页面的outline并弹出
-        """
+        """Pop all outlines belonging to the current page from deque"""
         outlines = []
         while len(self.outlines) > 0 and self.outlines[0].page_number is None:
             self.outlines.popleft()
@@ -261,76 +259,11 @@ class PDFFile:
             outlines.append(self.outlines.popleft())
         return outlines
 
-    def refine(self, llm_client, llm_model_name) -> None:
+    def refine(self) -> None:
         """
-        标题refine的统一接口，包括使用大模型和使用标题列表
+        placeholder: keep interface but no longer depend on large model. Currently no extra refine.
         """
-        self.get_all_elements()
-        self.refine_with_llm(
-            self.all_elements, llm_client=llm_client, llm_model_name=llm_model_name
-        )
-
-    def refine_with_llm(
-        self, elements: List[PageElement], llm_client, llm_model_name
-    ) -> None:
-        """
-        未检测到任何的标题信息，最终使用大模型进行标题refine
-        """
-        # 收集所有header
-        candidates: List[str] = [
-            element.content.strip()
-            for element in self.all_elements
-            if element.content_type == "header" and element.content
-        ]
-        if not candidates:
-            return
-        prompt = (
-            "下面是从 PDF 里初步检测出来的标题候选，请你帮我清洗并补全成 Markdown 的标题结构：\n"
-            "要求：\n"
-            "1. 用 #、##、### 表示层级\n"
-            "2. 不可修改标题内容\n"
-            "3. 输出必须是一个 Markdown 文本列表，每一行一个标题\n"
-            "4. 去掉在正文前（例如代码里的注释，log的输出）误加的‘#’号\n"
-            "5. 将孤立的字符（例如阿拉伯数字、罗马数字、单个字母、页码等）去掉‘#’号回退回正文\n"
-            "6. 严格按照以下格式输出，不要添加任何额外说明：\n\n"
-            "# 标题1\n"
-            "## 标题2\n"
-            "### 标题3\n\n"
-            "候选标题：\n" + "\n".join(candidates)
-        )
-        full_response = ""
-        response = llm_client.chat_completion_stream(
-            model_name=llm_model_name,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        for chunk, _ in response:
-            full_response += chunk
-        # 解析LLM输出
-        refined_lines = [
-            line.strip()
-            for line in full_response.strip().splitlines()
-            if line.strip().startswith("#")
-        ]
-        if len(refined_lines) == 0:
-            print("Get None response from LLM")
-            return elements
-        # 转换成(level,content)
-        refined_outlines: List[Tuple[int, str]] = []
-        for line in refined_lines:
-            # 计算标题层级
-            level = 0
-            for char in line:
-                if char == "#":
-                    level += 1
-                else:
-                    break
-            title = line[level:].strip()
-            if title:  # 确保标题不为空
-                refined_outlines.append((level, title))
-        # 根据匹配结果回写elements
-        self._refine_with_candidates(
-            elements, refined_outlines, threshold=0.6, downgrade_to_plain=True
-        )
+        return None
 
     @staticmethod
     def _refine_with_candidates(
@@ -340,7 +273,7 @@ class PDFFile:
         downgrade_to_plain: bool = True,
     ) -> None:
         """
-        核心匹配逻辑：给定候选(level, text)，修正elements的header。
+        Core matching logic: given candidates (level, text), refine elements' header.
         """
         for element in elements:
             if element.content_type != "header" or not element.content:
@@ -350,7 +283,7 @@ class PDFFile:
             best = None
             best_score = 0.0
             for c_level, c_text in candidates:
-                # 先找到A,B公共子序列M,相似度=(2×len(M))/(len(A),len(B))
+                # find the longest common subsequence M between A and B, similarity = (2 * len(M)) / (len(A), len(B))
                 score = difflib.SequenceMatcher(
                     None, text.lower(), c_text.lower()
                 ).ratio()
@@ -362,13 +295,13 @@ class PDFFile:
                 c_level, c_text = best
                 element.content = f"{'#' * c_level} {c_text}"
             elif downgrade_to_plain:
-                # 没找到合理匹配，降级为正文
+                # if no reasonable match is found, downgrade to plain text
                 element.content_type = "plain_text"
                 element.content = text
 
     def check_multicolumn(self) -> None:
         """
-        随机抽取 pdf 的若干页检测是否疑似多栏，否则告警
+        Randomly sample several pages of pdf to check if it is疑似多栏，否则告警
         """
         if not Path(self.file_path).exists():
             raise FileNotFoundError(f"File does not exist: {self.file_path}")
@@ -383,33 +316,33 @@ class PDFFile:
                 # 统计所有词的x方向中心点
                 x_centers += [(float(w["x0"]) + float(w["x1"])) / 2 for w in words]
 
-        if len(x_centers) < 30:  # 样本太少不判断
+        if len(x_centers) < 30:  # sample too few to judge
             return None
-        # 归一化坐标到区间 [0, 1]
+        # normalize coordinates to interval [0, 1]
         x_arr = np.array(x_centers)
         x_arr = (x_arr - x_arr.min()) / (x_arr.max() - x_arr.min() + 1e-6)
 
-        # 做直方图
+        # create histogram
         hist, bin_edges = np.histogram(x_arr, bins=30)
         bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
         total_counts = hist.sum()
 
-        # 峰值检测
+        # peak detection
         peaks: List[Tuple[float, int]] = []
         for i in range(1, len(hist) - 1):
             if hist[i] > hist[i - 1] and hist[i] > hist[i + 1]:
                 peaks.append((bin_centers[i], hist[i]))
 
         if len(peaks) < 2:
-            return None  # 只有一个峰，认为是单栏
+            return None  # only one peak, consider single column
 
-        # 取排序后最大两个峰
+        # take the two largest peaks after sorting
         peaks = sorted(peaks, key=lambda p: p[1], reverse=True)[:2]
         p1, c1 = peaks[0]
         p2, c2 = peaks[1]
 
-        gap = abs(p1 - p2)  # 峰的间距
-        ratio = min(c1, c2) / total_counts  # 次峰值占比
+        gap = abs(p1 - p2)  # peak gap
+        ratio = min(c1, c2) / total_counts  # secondary peak ratio
 
         if gap > 0.25 and ratio > 0.30:
             warnings.warn(
@@ -420,21 +353,23 @@ class PDFFile:
 
     def element_to_markdown(self, output_file_path: Union[str, Path]) -> str:
         """
-        PDFFilemarkdown,正文元素不换行拼接，非正文元素单独一行。
+        PDFFile markdown, plain text elements do not wrap, non-plain text elements are on a separate line.
         """
         markdown_parts: List[str] = []
-        buffer_text: List[str] = []  # 临时缓存
-        self.get_all_elements()  # 获取所有的element对象
+        buffer_text: List[str] = []  # temporary buffer
+        self.get_all_elements()  # get all element objects
         for element in self.all_elements:
             content = element.content.strip()
             if element.content_type == "plain_text":
                 buffer_text.append(content)
             else:
-                # 如果有缓存正文，先合并再flush
+                # if there is buffer text, merge and flush first
                 if buffer_text:
                     markdown_parts.append("".join(buffer_text))
                     buffer_text = []
-                markdown_parts.append(content)  # 非正文直接单独一行
+                markdown_parts.append(
+                    content
+                )  # non-plain text elements are on a separate line
         if buffer_text:
             markdown_parts.append("".join(buffer_text))
         result = "\n".join(markdown_parts)
@@ -452,7 +387,7 @@ class PDFFile:
 
     def get_all_elements(self) -> None:
         """
-        让pdffile对象直接获取所有的element对象
+        Let pdffile object directly get all element objects
         """
         if len(self.all_elements) == 0:
             for page in self.pages:

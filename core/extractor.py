@@ -11,6 +11,7 @@ from doclayout_yolo import YOLOv10
 from pdfplumber.page import Page
 
 from .schema import BoundingBox, PageElement
+from utils import get_config_value
 
 IMAGE_PATH_TEMPLATE = "page_{page_index}_image_{image_index}.png"
 IMAGE_LINK_TEMPLATE = "![page_{page_index}_image_{i}]({link})"
@@ -34,6 +35,7 @@ class ImageExtractor(BaseExtractor):
     """Extracts images from a page."""
 
     def __init__(self, config: dict, image_output_dir: Path, markdown_output_dir: Path):
+        super().__init__(config)
         # Auto find cuda
         self.yolo_model = YOLOv10(config["doclayout_yolo"]["model_path"]).to(
             "cuda" if torch.cuda.is_available() else "cpu"
@@ -41,29 +43,63 @@ class ImageExtractor(BaseExtractor):
         self.image_output_dir = image_output_dir  # Image output path
         self.markdown_output_dir = markdown_output_dir  # Markdown output path
 
+        # 从配置读取参数
+        self.yolo_predict_resolution = get_config_value(
+            config, "image_extractor", "yolo_predict_resolution", 180, int
+        )
+        self.yolo_imgsz = get_config_value(
+            config, "image_extractor", "yolo_imgsz", 1024, int
+        )
+        self.yolo_conf = get_config_value(
+            config, "image_extractor", "yolo_conf", 0.65, float
+        )
+        self.yolo_image_class_id = get_config_value(
+            config, "image_extractor", "yolo_image_class_id", 3, int
+        )
+        self.yolo_verbose = get_config_value(
+            config, "image_extractor", "yolo_verbose", False, bool
+        )
+        self.save_dpi = get_config_value(
+            config, "image_extractor", "save_dpi", 720, int
+        )
+        self.overlap_thresh = get_config_value(
+            config, "image_extractor", "overlap_thresh", 0.75, float
+        )
+        self.transfer_dpi = get_config_value(
+            config, "image_extractor", "transfer_dpi", 180, int
+        )
+
     def _execute(
         self,
         page: Page,
         page_index: int,
-        save_dpi: int = 720,
-        overlap_thresh: float = 0.75,
+        save_dpi: int = None,
+        overlap_thresh: float = None,
     ) -> List[PageElement]:
         """
         get image elements from page
         """
+        # 使用配置中的默认值，允许调用时覆盖
+        if save_dpi is None:
+            save_dpi = self.save_dpi
+        if overlap_thresh is None:
+            overlap_thresh = self.overlap_thresh
+
         image_elements: List[PageElement] = []
         result = self.yolo_model.predict(
-            source=page.to_image(resolution=180).original,
-            imgsz=1024,
-            conf=0.65,
-            verbose=False,
+            source=page.to_image(resolution=self.yolo_predict_resolution).original,
+            imgsz=self.yolo_imgsz,
+            conf=self.yolo_conf,
+            verbose=self.yolo_verbose,
             device="cuda" if torch.cuda.is_available() else "cpu",
         )[0]
-        indices = torch.where(result.boxes.cls == 3)[0]
+        indices = torch.where(result.boxes.cls == self.yolo_image_class_id)[0]
 
         if indices.numel() == 0:
             return []
-        dpi_scale = save_dpi / 180  # scale for converting to save_dpi
+        dpi_scale = (
+            save_dpi / self.yolo_predict_resolution
+        )  # scale for converting to save_dpi
         boxes = [tuple(b.item() for b in box) for box in result.boxes.xyxy[indices]]
         merged_boxes = self.merge_overlapping_boxes(
             boxes=boxes, overlap_thresh=overlap_thresh
@@ -83,7 +119,7 @@ class ImageExtractor(BaseExtractor):
                 PageElement(
                     content_type="figure",
                     page_idx=page_index,
-                    bbox=self.base_transfer(bbox=box, page=page),
+                    bbox=self.base_transfer(bbox=box, page=page, dpi=self.transfer_dpi),
                     content=IMAGE_LINK_TEMPLATE.format(
                         page_index=page_index, i=i, link=link
                     ),
@@ -146,8 +182,21 @@ class ImageExtractor(BaseExtractor):
 class TextExtractor(BaseExtractor):
     """Extract text content"""
 
-    def __init__(self, header_predict_work: bool = False):
+    def __init__(self, config: dict = None, header_predict_work: bool = False):
+        if config is None:
+            config = {}
+        super().__init__(config)
         self.work = header_predict_work
+        # 从配置读取参数
+        self.x_tolerance = get_config_value(
+            config, "text_extractor", "x_tolerance", 1, int
+        )
+        self.y_tolerance = get_config_value(
+            config, "text_extractor", "y_tolerance", 1, int
+        )
+        self.keep_blank_chars = get_config_value(
+            config, "text_extractor", "keep_blank_chars", False, bool
+        )
 
     def _execute(self, page: Page, page_index: int) -> List[PageElement]:
         text: List[PageElement] = []
@@ -198,9 +247,8 @@ class TextExtractor(BaseExtractor):
             )
         return table_elements, bboxes
 
-    @staticmethod
     def get_links(
-        page: Page, page_index: int
+        self, page: Page, page_index: int
     ) -> Tuple[List[PageElement], List[BoundingBox]]:
         """Get link elements"""
         annots = getattr(page, "annots", None)
@@ -209,7 +257,11 @@ class TextExtractor(BaseExtractor):
         link_elements: List[PageElement] = []
         bboxes: List[BoundingBox] = []
         words = (
-            page.extract_words(x_tolerance=1, y_tolerance=1, keep_blank_chars=False)
+            page.extract_words(
+                x_tolerance=self.x_tolerance,
+                y_tolerance=self.y_tolerance,
+                keep_blank_chars=self.keep_blank_chars,
+            )
             or []
         )
         for annot in annots:
